@@ -96,13 +96,36 @@ function haptic(times = 1) {
 
 // 今の向き（背面／イン）のカメラ映像だけを取得（マイクは取り直さない）
 async function openVideoTrack() {
-  let s;
-  try {
-    s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(true), audio: false });
-  } catch (e) {
-    s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(false), audio: false });
+  const tries = [
+    videoConstraints(true),                 // 向き指定（厳密）＋解像度
+    { facingMode: { exact: facing } },      // 向き指定（厳密）のみ
+    { facingMode: facing }                  // 向き指定（ゆるめ）
+  ];
+  let lastErr = null;
+  for (const video of tries) {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      const t = s.getVideoTracks()[0];
+      const fm = t.getSettings ? t.getSettings().facingMode : undefined;
+      if (fm && fm !== facing) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
+      return t;
+    } catch (e) { lastErr = e; }
   }
-  return s.getVideoTracks()[0];
+  // 最後の手段：カメラ名（前面／背面）から探して開く
+  const re = facing === 'user' ? /front|前面|フロント/i : /back|背面|バック|rear/i;
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  const d = devs.find(x => x.kind === 'videoinput' && re.test(x.label));
+  if (d) {
+    const s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId } }, audio: false });
+    return s.getVideoTracks()[0];
+  }
+  throw lastErr || new Error('カメラが見つかりません');
+}
+
+// 画面下に薄くメッセージを出して数秒で消す
+function notice(text) {
+  msg.textContent = text;
+  setTimeout(() => { if (msg.textContent === text) msg.textContent = ''; }, 4000);
 }
 
 // 映像トラックとマイクトラックを1本のストリームにまとめてプレビューに流す
@@ -140,22 +163,25 @@ async function switchCamera() {
   if (switching || photoBusy || (rec && rec.state === 'recording')) return;
   switching = true;
   const prev = facing;
+  const next = facing === 'environment' ? 'user' : 'environment';
+  haptic(next === 'user' ? 3 : 1); // タップした瞬間に振動（インカメラへ＝3回、背面へ＝1回）
   try {
     if (torchOn) await setTorch(false);
     videoTrack.stop(); // iOSは別のカメラを同時に使えないため、先に今のカメラを止める
-    facing = facing === 'environment' ? 'user' : 'environment';
+    facing = next;
     try {
       videoTrack = await openVideoTrack();
     } catch (e) {
       facing = prev; // 切替に失敗したら元のカメラに戻す
       videoTrack = await openVideoTrack();
+      notice('カメラ切替失敗：' + (e.name || e.message));
     }
     attachStream();
     camLabel.textContent = facing === 'user' ? 'インカメラ' : '';
-    haptic(1);
   } catch (e) {
     if (audioTrack) audioTrack.stop();
     stream = null; videoTrack = null; audioTrack = null;
+    camLabel.textContent = '';
     msg.textContent = 'タップでカメラを再起動';
   } finally {
     switching = false;
