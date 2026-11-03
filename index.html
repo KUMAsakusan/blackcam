@@ -18,8 +18,6 @@
   #h2 { left:0; right:0; top:60%; height:1px; }
   #v1 { left:50%; width:1px; top:0; height:40%; }
   #v2 { left:50%; width:1px; top:60%; bottom:0; }
-  #camLabel { position:fixed; left:0; right:0; top:40%; height:20%; display:flex;
-    align-items:center; justify-content:center; color:#1c1c1c; font:13px -apple-system, sans-serif; pointer-events:none; }
   video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
   #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
     width:8px; height:8px; border-radius:50%; background:#f00; opacity:0; pointer-events:none; }
@@ -42,7 +40,6 @@
 <div class="line" id="h2"></div>
 <div class="line" id="v1"></div>
 <div class="line" id="v2"></div>
-<div id="camLabel"></div>
 <div id="guide">
   <div>左上：写真</div>
   <div>右上：写真＋ライト</div>
@@ -59,7 +56,7 @@ const SHOW_DOT   = false; // 録画中の赤い点（表示するなら true）
 const SHOW_GUIDE = false; // 起動時の操作説明（表示するなら true）
 const HAPTICS    = true;  // 振動（不要なら false）
 const TORCH_WAIT = 600;   // 写真でライト点灯後、撮影までの待ち時間（ミリ秒）
-const DEBUG      = true;  // 診断表示（中央にカメラの状態を表示。原因が分かったら false に戻す）
+const DEBUG      = true;  // 診断表示（画面下にカメラの状態を表示。原因が分かったら false に戻す）
 
 const v = document.getElementById('v');
 const pad = document.getElementById('pad');
@@ -67,7 +64,6 @@ const dot = document.getElementById('dot');
 const msg = document.getElementById('msg');
 const guide = document.getElementById('guide');
 const save = document.getElementById('save');
-const camLabel = document.getElementById('camLabel');
 
 let stream = null, videoTrack = null, audioTrack = null;
 let rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, photoBusy = false;
@@ -95,18 +91,18 @@ function haptic(times = 1) {
   }
 }
 
-// 診断表示（DEBUG が true のときだけ中央に表示）
+// 診断表示（DEBUG が true のときだけ画面下に表示）
 function status(text) {
   if (!DEBUG) return;
-  camLabel.style.color = '#666';
-  camLabel.textContent = text;
+  msg.style.color = '#666';
+  msg.textContent = text;
 }
 
-// カメラ取得（6秒で応答がなければ失敗扱い）
+// カメラ取得（4秒で応答がなければ失敗扱い）
 function gum(c) {
   return Promise.race([
     navigator.mediaDevices.getUserMedia(c),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('タイムアウト')), 6000))
+    new Promise((_, reject) => setTimeout(() => reject(new Error('タイムアウト')), 4000))
   ]);
 }
 
@@ -202,17 +198,12 @@ async function switchCamera() {
       status('切替失敗：' + (e.name || '') + ' ' + (e.message || ''));
     }
     attachStream();
-    if (DEBUG) {
-      if (facing === next) status('OK ' + trackInfo(videoTrack));
-    } else {
-      camLabel.textContent = facing === 'user' ? 'インカメラ' : '';
-    }
+    if (facing === next) status('OK ' + trackInfo(videoTrack));
   } catch (e) {
     if (audioTrack) audioTrack.stop();
     stream = null; videoTrack = null; audioTrack = null;
-    camLabel.textContent = '';
     status('停止：' + (e.name || '') + ' ' + (e.message || ''));
-    msg.textContent = 'タップでカメラを再起動';
+    if (!DEBUG) msg.textContent = 'タップでカメラを再起動';
   } finally {
     switching = false;
   }
