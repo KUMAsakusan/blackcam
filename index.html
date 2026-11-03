@@ -1,4 +1,4 @@
-!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
@@ -33,7 +33,7 @@
 <div id="pad"></div>
 <div id="guide">
   <div>上半分をタップ：動画 開始／停止</div>
-  <div>下半分をタップ：写真</div>
+  <div>下半分をタップ：動画＋ライト 開始／停止</div>
 </div>
 <div id="dot"></div>
 <button id="save"></button>
@@ -51,7 +51,9 @@ const msg = document.getElementById('msg');
 const guide = document.getElementById('guide');
 const save = document.getElementById('save');
 
-let stream = null, rec = null, chunks = [], pending = [], wakeLock = null;
+const VIDEO_CONSTRAINTS = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+let stream = null, rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false;
 
 // 振動（iOS 18以降のSafari）
 function haptic(times = 1) {
@@ -73,7 +75,7 @@ function haptic(times = 1) {
 
 // カメラ起動（音声が拒否されたら映像のみ）
 async function startCamera() {
-  const video = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+  const video = VIDEO_CONSTRAINTS;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
   } catch (e) {
@@ -89,6 +91,19 @@ async function startCamera() {
   keepAwake();
 }
 
+// ライト（トーチ）の点灯・消灯
+async function setTorch(on) {
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track) return false;
+  try {
+    await track.applyConstraints({ ...VIDEO_CONSTRAINTS, advanced: [{ torch: on }] });
+    torchOn = on;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // 画面の自動ロック防止
 async function keepAwake() {
   try {
@@ -98,22 +113,25 @@ async function keepAwake() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && rec && rec.state === 'recording') rec.stop();
+  if (document.visibilityState === 'hidden' && torchOn) setTorch(false);
   if (document.visibilityState === 'visible' && stream) keepAwake();
 });
 
-// 録画の開始・停止
-function toggleVideo() {
+// 録画の開始・停止（withLight = true でライト点灯）
+async function toggleVideo(withLight) {
   if (rec && rec.state === 'recording') {
     rec.stop();
     haptic(2);
     return;
   }
+  if (withLight) await setTorch(true);
   const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
   rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
   chunks = [];
   rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   rec.onstop = () => {
     dot.style.opacity = 0;
+    if (torchOn) setTorch(false);
     const blob = new Blob(chunks, { type: 'video/mp4' });
     chunks = [];
     if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
@@ -175,7 +193,7 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：上半分タップ＝動画、下半分タップ＝写真
+// 操作：上半分タップ＝動画、下半分タップ＝動画＋ライト（録画中はどちらをタップしても停止）
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
 pad.addEventListener('pointerdown', e => {
@@ -193,8 +211,7 @@ pad.addEventListener('pointerup', async e => {
     try { await startCamera(); } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
     return;
   }
-  if (e.clientY < window.innerHeight / 2) toggleVideo();
-  else takePhoto();
+  toggleVideo(e.clientY >= window.innerHeight / 2);
 });
 </script>
 </body>
