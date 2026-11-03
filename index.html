@@ -14,17 +14,22 @@
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
   #pad { position:fixed; inset:0; background:#000; }
   .line { position:fixed; background:#161616; pointer-events:none; }
-  #lh { left:0; right:0; top:50%; height:1px; }
-  #lv { top:0; bottom:0; left:50%; width:1px; }
+  #h1 { left:0; right:0; top:40%; height:1px; }
+  #h2 { left:0; right:0; top:60%; height:1px; }
+  #v1 { left:50%; width:1px; top:0; height:40%; }
+  #v2 { left:50%; width:1px; top:60%; bottom:0; }
+  #camLabel { position:fixed; left:0; right:0; top:40%; height:20%; display:flex;
+    align-items:center; justify-content:center; color:#1c1c1c; font:13px -apple-system, sans-serif; pointer-events:none; }
   video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
   #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
     width:8px; height:8px; border-radius:50%; background:#f00; opacity:0; pointer-events:none; }
   #msg { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom) + 24px);
     text-align:center; color:#2a2a2a; font:14px -apple-system, sans-serif; pointer-events:none; }
-  #guide { position:fixed; inset:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
+  #guide { position:fixed; inset:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:2fr 1fr 2fr;
     pointer-events:none; opacity:0; transition:opacity .6s; }
   #guide div { display:flex; align-items:center; justify-content:center; text-align:center;
     padding:8px; color:#444; font:15px -apple-system, sans-serif; }
+  #guide .mid { grid-column:1 / 3; }
   #save { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px);
     transform:translateX(-50%); display:none; background:#050505; color:#2a2a2a;
     border:1px solid #111; border-radius:20px; padding:12px 24px; font:15px -apple-system, sans-serif; }
@@ -33,11 +38,15 @@
 <body>
 <video id="v" muted playsinline autoplay></video>
 <div id="pad"></div>
-<div class="line" id="lh"></div>
-<div class="line" id="lv"></div>
+<div class="line" id="h1"></div>
+<div class="line" id="h2"></div>
+<div class="line" id="v1"></div>
+<div class="line" id="v2"></div>
+<div id="camLabel"></div>
 <div id="guide">
   <div>左上：写真</div>
   <div>右上：写真＋ライト</div>
+  <div class="mid">中央：インカメラ／背面カメラ 切替</div>
   <div>左下：動画 開始／停止</div>
   <div>右下：動画＋ライト 開始／停止</div>
 </div>
@@ -57,10 +66,14 @@ const dot = document.getElementById('dot');
 const msg = document.getElementById('msg');
 const guide = document.getElementById('guide');
 const save = document.getElementById('save');
-
-const VIDEO_CONSTRAINTS = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+const camLabel = document.getElementById('camLabel');
 
 let stream = null, rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, photoBusy = false;
+let facing = 'environment', switching = false; // environment＝背面カメラ、user＝インカメラ
+
+function videoConstraints(exact) {
+  return { facingMode: exact ? { exact: facing } : { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+}
 
 // 振動（iOS 18以降のSafari）
 function haptic(times = 1) {
@@ -80,14 +93,27 @@ function haptic(times = 1) {
   }
 }
 
-// カメラ起動（音声が拒否されたら映像のみ）
-async function startCamera() {
-  const video = VIDEO_CONSTRAINTS;
+// 映像＋音声を取得（音声が拒否されたら映像のみ）
+async function getStream(video) {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+    return await navigator.mediaDevices.getUserMedia({ video, audio: true });
   } catch (e) {
-    stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+    return await navigator.mediaDevices.getUserMedia({ video, audio: false });
   }
+}
+
+// 現在の向き（背面／イン）のカメラを開く
+async function openStream() {
+  try {
+    return await getStream(videoConstraints(true));
+  } catch (e) {
+    return await getStream(videoConstraints(false));
+  }
+}
+
+// カメラ起動
+async function startCamera() {
+  stream = await openStream();
   v.srcObject = stream;
   await v.play();
   msg.textContent = '';
@@ -98,12 +124,40 @@ async function startCamera() {
   keepAwake();
 }
 
-// ライト（トーチ）の点灯・消灯
+// インカメラ／背面カメラの切替
+async function switchCamera() {
+  if (switching || photoBusy || (rec && rec.state === 'recording')) return;
+  switching = true;
+  const prev = facing;
+  try {
+    if (torchOn) await setTorch(false);
+    facing = facing === 'environment' ? 'user' : 'environment';
+    stream.getTracks().forEach(t => t.stop());
+    try {
+      stream = await openStream();
+    } catch (e) {
+      facing = prev; // 切替に失敗したら元のカメラに戻す
+      stream = await openStream();
+    }
+    v.srcObject = stream;
+    await v.play();
+    camLabel.textContent = facing === 'user' ? 'インカメラ' : '';
+    haptic(1);
+  } catch (e) {
+    stream = null;
+    msg.textContent = 'タップでカメラを再起動';
+  } finally {
+    switching = false;
+  }
+}
+
+// ライト（トーチ）の点灯・消灯（インカメラにはライトがないため何もしない）
 async function setTorch(on) {
+  if (facing === 'user') return false;
   const track = stream && stream.getVideoTracks()[0];
   if (!track) return false;
   try {
-    await track.applyConstraints({ ...VIDEO_CONSTRAINTS, advanced: [{ torch: on }] });
+    await track.applyConstraints({ ...videoConstraints(false), advanced: [{ torch: on }] });
     torchOn = on;
     return true;
   } catch (e) {
@@ -209,7 +263,8 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：左上＝写真、右上＝写真＋ライト、左下＝動画、右下＝動画＋ライト（録画中はどこをタップしても停止）
+// 操作：上段 左＝写真／右＝写真＋ライト、中央＝カメラ切替、下段 左＝動画／右＝動画＋ライト
+// 録画中はどこをタップしても停止
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
 pad.addEventListener('pointerdown', e => {
@@ -229,9 +284,10 @@ pad.addEventListener('pointerup', async e => {
   }
   if (rec && rec.state === 'recording') { toggleVideo(false); return; }
 
-  const isTop   = e.clientY < window.innerHeight / 2;
+  const y = e.clientY / window.innerHeight;
   const isRight = e.clientX >= window.innerWidth / 2;
-  if (isTop) takePhoto(isRight);
+  if (y < 0.4) takePhoto(isRight);
+  else if (y < 0.6) switchCamera();
   else toggleVideo(isRight);
 });
 </script>
