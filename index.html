@@ -59,6 +59,7 @@ const SHOW_DOT   = false; // 録画中の赤い点（表示するなら true）
 const SHOW_GUIDE = false; // 起動時の操作説明（表示するなら true）
 const HAPTICS    = true;  // 振動（不要なら false）
 const TORCH_WAIT = 600;   // 写真でライト点灯後、撮影までの待ち時間（ミリ秒）
+const DEBUG      = true;  // 診断表示（中央にカメラの状態を表示。原因が分かったら false に戻す）
 
 const v = document.getElementById('v');
 const pad = document.getElementById('pad');
@@ -94,6 +95,26 @@ function haptic(times = 1) {
   }
 }
 
+// 診断表示（DEBUG が true のときだけ中央に表示）
+function status(text) {
+  if (!DEBUG) return;
+  camLabel.style.color = '#666';
+  camLabel.textContent = text;
+}
+
+// カメラ取得（6秒で応答がなければ失敗扱い）
+function gum(c) {
+  return Promise.race([
+    navigator.mediaDevices.getUserMedia(c),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('タイムアウト')), 6000))
+  ]);
+}
+
+function trackInfo(t) {
+  const s = t.getSettings ? t.getSettings() : {};
+  return `${s.facingMode || '向き不明'} / ${t.label || '名前なし'}`;
+}
+
 // 今の向き（背面／イン）のカメラ映像だけを取得（マイクは取り直さない）
 async function openVideoTrack() {
   const tries = [
@@ -104,7 +125,7 @@ async function openVideoTrack() {
   let lastErr = null;
   for (const video of tries) {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      const s = await gum({ video, audio: false });
       const t = s.getVideoTracks()[0];
       const fm = t.getSettings ? t.getSettings().facingMode : undefined;
       if (fm && fm !== facing) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
@@ -116,7 +137,7 @@ async function openVideoTrack() {
   const devs = await navigator.mediaDevices.enumerateDevices();
   const d = devs.find(x => x.kind === 'videoinput' && re.test(x.label));
   if (d) {
-    const s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId } }, audio: false });
+    const s = await gum({ video: { deviceId: { exact: d.deviceId } }, audio: false });
     return s.getVideoTracks()[0];
   }
   throw lastErr || new Error('カメラが見つかりません');
@@ -160,8 +181,11 @@ async function startCamera() {
 
 // インカメラ／背面カメラの切替（映像トラックだけ入れ替える）
 async function switchCamera() {
-  if (switching || photoBusy || (rec && rec.state === 'recording')) return;
+  if (switching)  { status('切替中のため無視'); return; }
+  if (photoBusy)  { status('撮影中のため無視'); return; }
+  if (rec && rec.state === 'recording') return;
   switching = true;
+  status('切替中…');
   const prev = facing;
   const next = facing === 'environment' ? 'user' : 'environment';
   haptic(next === 'user' ? 3 : 1); // タップした瞬間に振動（インカメラへ＝3回、背面へ＝1回）
@@ -175,13 +199,19 @@ async function switchCamera() {
       facing = prev; // 切替に失敗したら元のカメラに戻す
       videoTrack = await openVideoTrack();
       notice('カメラ切替失敗：' + (e.name || e.message));
+      status('切替失敗：' + (e.name || '') + ' ' + (e.message || ''));
     }
     attachStream();
-    camLabel.textContent = facing === 'user' ? 'インカメラ' : '';
+    if (DEBUG) {
+      if (facing === next) status('OK ' + trackInfo(videoTrack));
+    } else {
+      camLabel.textContent = facing === 'user' ? 'インカメラ' : '';
+    }
   } catch (e) {
     if (audioTrack) audioTrack.stop();
     stream = null; videoTrack = null; audioTrack = null;
     camLabel.textContent = '';
+    status('停止：' + (e.name || '') + ' ' + (e.message || ''));
     msg.textContent = 'タップでカメラを再起動';
   } finally {
     switching = false;
@@ -319,13 +349,17 @@ pad.addEventListener('pointerup', async e => {
 
   if (!stream) {
     haptic(1);
-    try { await startCamera(); } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
+    try {
+      await startCamera();
+      status('起動 ' + trackInfo(videoTrack));
+    } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
     return;
   }
   if (rec && rec.state === 'recording') { toggleVideo(false); return; }
 
   const y = e.clientY / window.innerHeight;
   const isRight = e.clientX >= window.innerWidth / 2;
+  if (DEBUG && !(y >= 0.4 && y < 0.6)) status(`タップ位置 ${Math.round(y * 100)}%`);
   if (y < 0.4) takePhoto(isRight);
   else if (y < 0.6) switchCamera();
   else toggleVideo(isRight);
