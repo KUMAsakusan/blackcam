@@ -13,6 +13,9 @@
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
   #pad { position:fixed; inset:0; background:#000; }
+  .line { position:fixed; left:0; right:0; height:1px; background:#161616; pointer-events:none; }
+  #l1 { top:33.333%; }
+  #l2 { top:66.666%; }
   video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
   #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
     width:8px; height:8px; border-radius:50%; background:#f00; opacity:0; pointer-events:none; }
@@ -22,7 +25,7 @@
     pointer-events:none; opacity:0; transition:opacity .6s; }
   #guide div { flex:1; display:flex; align-items:center; justify-content:center;
     color:#444; font:15px -apple-system, sans-serif; }
-  #guide div:first-child { border-bottom:1px dashed #222; }
+  #guide div:not(:last-child) { border-bottom:1px dashed #222; }
   #save { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px);
     transform:translateX(-50%); display:none; background:#050505; color:#2a2a2a;
     border:1px solid #111; border-radius:20px; padding:12px 24px; font:15px -apple-system, sans-serif; }
@@ -31,9 +34,12 @@
 <body>
 <video id="v" muted playsinline autoplay></video>
 <div id="pad"></div>
+<div class="line" id="l1"></div>
+<div class="line" id="l2"></div>
 <div id="guide">
-  <div>上半分をタップ：動画 開始／停止</div>
-  <div>下半分をタップ：動画＋ライト 開始／停止</div>
+  <div>上1/3をタップ：写真＋ライト</div>
+  <div>中1/3をタップ：動画 開始／停止</div>
+  <div>下1/3をタップ：動画＋ライト 開始／停止</div>
 </div>
 <div id="dot"></div>
 <button id="save"></button>
@@ -43,6 +49,7 @@
 const SHOW_DOT   = false; // 録画中の赤い点（表示するなら true）
 const SHOW_GUIDE = false; // 起動時の操作説明（表示するなら true）
 const HAPTICS    = true;  // 振動（不要なら false）
+const TORCH_WAIT = 600;   // 写真でライト点灯後、撮影までの待ち時間（ミリ秒）
 
 const v = document.getElementById('v');
 const pad = document.getElementById('pad');
@@ -53,7 +60,7 @@ const save = document.getElementById('save');
 
 const VIDEO_CONSTRAINTS = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
 
-let stream = null, rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false;
+let stream = null, rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, photoBusy = false;
 
 // 振動（iOS 18以降のSafari）
 function haptic(times = 1) {
@@ -141,18 +148,27 @@ async function toggleVideo(withLight) {
   if (SHOW_DOT) dot.style.opacity = 0.4;
 }
 
-// 無音の写真撮影（映像のフレームを保存）
-function takePhoto() {
-  if (!v.videoWidth) return;
+// 無音の写真撮影（withLight = true でライトを点けて撮影し、撮影後に消灯）
+async function takePhoto(withLight) {
+  if (!v.videoWidth || photoBusy) return;
+  photoBusy = true;
   haptic(1);
-  blink();
-  const c = document.createElement('canvas');
-  c.width = v.videoWidth;
-  c.height = v.videoHeight;
-  c.getContext('2d').drawImage(v, 0, 0);
-  c.toBlob(b => {
-    if (b) addPending(new File([b], fileName('jpg'), { type: 'image/jpeg' }));
-  }, 'image/jpeg', 0.92);
+  try {
+    if (withLight && await setTorch(true)) {
+      await new Promise(r => setTimeout(r, TORCH_WAIT)); // 明るさが合うまで待つ
+    }
+    blink();
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    c.toBlob(b => {
+      if (b) addPending(new File([b], fileName('jpg'), { type: 'image/jpeg' }));
+    }, 'image/jpeg', 0.92);
+  } finally {
+    if (withLight && torchOn) await setTorch(false);
+    photoBusy = false;
+  }
 }
 
 function blink() {
@@ -193,7 +209,7 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：上半分タップ＝動画、下半分タップ＝動画＋ライト（録画中はどちらをタップしても停止）
+// 操作：上1/3＝写真＋ライト、中1/3＝動画、下1/3＝動画＋ライト（録画中はどこをタップしても停止）
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
 pad.addEventListener('pointerdown', e => {
@@ -211,7 +227,12 @@ pad.addEventListener('pointerup', async e => {
     try { await startCamera(); } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
     return;
   }
-  toggleVideo(e.clientY >= window.innerHeight / 2);
+  if (rec && rec.state === 'recording') { toggleVideo(false); return; }
+
+  const h = window.innerHeight;
+  if (e.clientY < h / 3) takePhoto(true);
+  else if (e.clientY < h * 2 / 3) toggleVideo(false);
+  else toggleVideo(true);
 });
 </script>
 </body>
