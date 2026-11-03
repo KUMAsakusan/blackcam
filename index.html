@@ -13,19 +13,18 @@
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
   #pad { position:fixed; inset:0; background:#000; }
-  .line { position:fixed; left:0; right:0; height:1px; background:#161616; pointer-events:none; }
-  #l1 { top:33.333%; }
-  #l2 { top:66.666%; }
+  .line { position:fixed; background:#161616; pointer-events:none; }
+  #lh { left:0; right:0; top:50%; height:1px; }
+  #lv { top:0; bottom:0; left:50%; width:1px; }
   video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
   #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
     width:8px; height:8px; border-radius:50%; background:#f00; opacity:0; pointer-events:none; }
   #msg { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom) + 24px);
     text-align:center; color:#2a2a2a; font:14px -apple-system, sans-serif; pointer-events:none; }
-  #guide { position:fixed; inset:0; display:flex; flex-direction:column;
+  #guide { position:fixed; inset:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
     pointer-events:none; opacity:0; transition:opacity .6s; }
-  #guide div { flex:1; display:flex; align-items:center; justify-content:center;
-    color:#444; font:15px -apple-system, sans-serif; }
-  #guide div:not(:last-child) { border-bottom:1px dashed #222; }
+  #guide div { display:flex; align-items:center; justify-content:center; text-align:center;
+    padding:8px; color:#444; font:15px -apple-system, sans-serif; }
   #save { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px);
     transform:translateX(-50%); display:none; background:#050505; color:#2a2a2a;
     border:1px solid #111; border-radius:20px; padding:12px 24px; font:15px -apple-system, sans-serif; }
@@ -34,12 +33,13 @@
 <body>
 <video id="v" muted playsinline autoplay></video>
 <div id="pad"></div>
-<div class="line" id="l1"></div>
-<div class="line" id="l2"></div>
+<div class="line" id="lh"></div>
+<div class="line" id="lv"></div>
 <div id="guide">
-  <div>上1/3をタップ：写真＋ライト</div>
-  <div>中1/3をタップ：動画 開始／停止</div>
-  <div>下1/3をタップ：動画＋ライト 開始／停止</div>
+  <div>左上：写真</div>
+  <div>右上：写真＋ライト</div>
+  <div>左下：動画 開始／停止</div>
+  <div>右下：動画＋ライト 開始／停止</div>
 </div>
 <div id="dot"></div>
 <button id="save"></button>
@@ -209,7 +209,7 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：上1/3＝写真＋ライト、中1/3＝動画、下1/3＝動画＋ライト（録画中はどこをタップしても停止）
+// 操作：左上＝写真、右上＝写真＋ライト、左下＝動画、右下＝動画＋ライト（録画中はどこをタップしても停止）
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
 pad.addEventListener('pointerdown', e => {
@@ -229,10 +229,10 @@ pad.addEventListener('pointerup', async e => {
   }
   if (rec && rec.state === 'recording') { toggleVideo(false); return; }
 
-  const h = window.innerHeight;
-  if (e.clientY < h / 3) takePhoto(true);
-  else if (e.clientY < h * 2 / 3) toggleVideo(false);
-  else toggleVideo(true);
+  const isTop   = e.clientY < window.innerHeight / 2;
+  const isRight = e.clientX >= window.innerWidth / 2;
+  if (isTop) takePhoto(isRight);
+  else toggleVideo(isRight);
 });
 </script>
 </body>
