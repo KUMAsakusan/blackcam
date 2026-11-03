@@ -43,7 +43,7 @@
 <div id="guide">
   <div>左上：写真</div>
   <div>右上：写真＋ライト</div>
-  <div class="mid">中央：インカメラ／背面カメラ 切替</div>
+  <div class="mid">中央：インカメラ動画 開始／停止</div>
   <div>左下：動画 開始／停止</div>
   <div>右下：動画＋ライト 開始／停止</div>
 </div>
@@ -56,7 +56,7 @@ const SHOW_DOT   = false; // 録画中の赤い点（表示するなら true）
 const SHOW_GUIDE = false; // 起動時の操作説明（表示するなら true）
 const HAPTICS    = true;  // 振動（不要なら false）
 const TORCH_WAIT = 600;   // 写真でライト点灯後、撮影までの待ち時間（ミリ秒）
-const DEBUG      = true;  // 診断表示（画面下にカメラの状態を表示。原因が分かったら false に戻す）
+const DEBUG      = false; // 診断表示（画面下にカメラの状態を表示。調査するときだけ true）
 
 const v = document.getElementById('v');
 const pad = document.getElementById('pad');
@@ -66,11 +66,12 @@ const guide = document.getElementById('guide');
 const save = document.getElementById('save');
 
 let stream = null, videoTrack = null, audioTrack = null;
-let rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, photoBusy = false;
-let facing = 'environment', switching = false; // environment＝背面カメラ、user＝インカメラ
+let rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, busy = false;
+let facing = 'environment'; // environment＝背面カメラ、user＝インカメラ
+let camQueue = Promise.resolve(); // カメラ切替を1つずつ順番に行うための待ち行列
 
-function videoConstraints(exact) {
-  return { facingMode: exact ? { exact: facing } : { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+function videoConstraints(want, exact) {
+  return { facingMode: exact ? { exact: want } : { ideal: want }, width: { ideal: 1920 }, height: { ideal: 1080 } };
 }
 
 // 振動（iOS 18以降のSafari）
@@ -98,6 +99,12 @@ function status(text) {
   msg.textContent = text;
 }
 
+// 画面下に薄くメッセージを出して数秒で消す
+function notice(text) {
+  msg.textContent = text;
+  setTimeout(() => { if (msg.textContent === text) msg.textContent = ''; }, 4000);
+}
+
 // カメラ取得（4秒で応答がなければ失敗扱い）
 function gum(c) {
   return Promise.race([
@@ -111,12 +118,12 @@ function trackInfo(t) {
   return `${s.facingMode || '向き不明'} / ${t.label || '名前なし'}`;
 }
 
-// 今の向き（背面／イン）のカメラ映像だけを取得（マイクは取り直さない）
-async function openVideoTrack() {
+// 指定した向き（背面／イン）のカメラ映像だけを取得（マイクは取り直さない）
+async function openVideoTrack(want) {
   const tries = [
-    videoConstraints(true),                 // 向き指定（厳密）＋解像度
-    { facingMode: { exact: facing } },      // 向き指定（厳密）のみ
-    { facingMode: facing }                  // 向き指定（ゆるめ）
+    videoConstraints(want, true),        // 向き指定（厳密）＋解像度
+    { facingMode: { exact: want } },     // 向き指定（厳密）のみ
+    { facingMode: want }                 // 向き指定（ゆるめ）
   ];
   let lastErr = null;
   for (const video of tries) {
@@ -124,12 +131,12 @@ async function openVideoTrack() {
       const s = await gum({ video, audio: false });
       const t = s.getVideoTracks()[0];
       const fm = t.getSettings ? t.getSettings().facingMode : undefined;
-      if (fm && fm !== facing) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
+      if (fm && fm !== want) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
       return t;
     } catch (e) { lastErr = e; }
   }
   // 最後の手段：カメラ名（前面／背面）から探して開く
-  const re = facing === 'user' ? /front|前面|フロント/i : /back|背面|バック|rear/i;
+  const re = want === 'user' ? /front|前面|フロント/i : /back|背面|バック|rear/i;
   const devs = await navigator.mediaDevices.enumerateDevices();
   const d = devs.find(x => x.kind === 'videoinput' && re.test(x.label));
   if (d) {
@@ -139,12 +146,6 @@ async function openVideoTrack() {
   throw lastErr || new Error('カメラが見つかりません');
 }
 
-// 画面下に薄くメッセージを出して数秒で消す
-function notice(text) {
-  msg.textContent = text;
-  setTimeout(() => { if (msg.textContent === text) msg.textContent = ''; }, 4000);
-}
-
 // 映像トラックとマイクトラックを1本のストリームにまとめてプレビューに流す
 function attachStream() {
   stream = new MediaStream(audioTrack ? [videoTrack, audioTrack] : [videoTrack]);
@@ -152,18 +153,29 @@ function attachStream() {
   v.play().catch(() => {});
 }
 
+// 映像が実際に流れ始めるまで待つ（最大2秒）
+async function waitForVideo() {
+  const start = Date.now();
+  while (Date.now() - start < 2000) {
+    if (v.videoWidth && v.readyState >= 2) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  await new Promise(r => setTimeout(r, 200)); // 明るさ・ピントが落ち着くまで少し待つ
+}
+
 // カメラ起動（マイクはここで1回だけ取得し、カメラ切替後も使い回す）
 async function startCamera() {
   let s;
   try {
-    s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(true), audio: true });
+    s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints('environment', true), audio: true });
   } catch (e) {
     try {
-      s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(false), audio: true });
+      s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints('environment', false), audio: true });
     } catch (e2) {
-      s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(false), audio: false });
+      s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints('environment', false), audio: false });
     }
   }
+  facing = 'environment';
   videoTrack = s.getVideoTracks()[0];
   audioTrack = s.getAudioTracks()[0] || null;
   attachStream();
@@ -175,38 +187,36 @@ async function startCamera() {
   keepAwake();
 }
 
-// インカメラ／背面カメラの切替（映像トラックだけ入れ替える）
-async function switchCamera() {
-  if (switching)  { status('切替中のため無視'); return; }
-  if (photoBusy)  { status('撮影中のため無視'); return; }
-  if (rec && rec.state === 'recording') return;
-  switching = true;
-  status('切替中…');
-  const prev = facing;
-  const next = facing === 'environment' ? 'user' : 'environment';
-  haptic(next === 'user' ? 3 : 1); // タップした瞬間に振動（インカメラへ＝3回、背面へ＝1回）
-  try {
+// 指定した向きのカメラに切り替える（すでにその向きなら何もしない）。成功で true
+function useCamera(want) {
+  camQueue = camQueue.then(async () => {
+    if (!stream) return false;
+    if (facing === want && videoTrack && videoTrack.readyState === 'live') return true;
     if (torchOn) await setTorch(false);
+    const prev = facing;
     videoTrack.stop(); // iOSは別のカメラを同時に使えないため、先に今のカメラを止める
-    facing = next;
     try {
-      videoTrack = await openVideoTrack();
+      videoTrack = await openVideoTrack(want);
+      facing = want;
+      attachStream();
+      await waitForVideo();
+      status('OK ' + trackInfo(videoTrack));
+      return true;
     } catch (e) {
-      facing = prev; // 切替に失敗したら元のカメラに戻す
-      videoTrack = await openVideoTrack();
-      notice('カメラ切替失敗：' + (e.name || e.message));
       status('切替失敗：' + (e.name || '') + ' ' + (e.message || ''));
+      try {
+        videoTrack = await openVideoTrack(prev); // 失敗したら元のカメラに戻す
+        facing = prev;
+        attachStream();
+      } catch (e2) {
+        if (audioTrack) audioTrack.stop();
+        stream = null; videoTrack = null; audioTrack = null;
+        msg.textContent = 'タップでカメラを再起動';
+      }
+      return false;
     }
-    attachStream();
-    if (facing === next) status('OK ' + trackInfo(videoTrack));
-  } catch (e) {
-    if (audioTrack) audioTrack.stop();
-    stream = null; videoTrack = null; audioTrack = null;
-    status('停止：' + (e.name || '') + ' ' + (e.message || ''));
-    if (!DEBUG) msg.textContent = 'タップでカメラを再起動';
-  } finally {
-    switching = false;
-  }
+  }).catch(() => false);
+  return camQueue;
 }
 
 // ライト（トーチ）の点灯・消灯（インカメラにはライトがないため何もしない）
@@ -239,36 +249,48 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && stream) keepAwake();
 });
 
-// 録画の開始・停止（withLight = true でライト点灯）
-async function toggleVideo(withLight) {
+// 録画の停止
+function stopVideo() {
   if (rec && rec.state === 'recording') {
     rec.stop();
     haptic(2);
-    return;
   }
-  haptic(1);
-  if (withLight) await setTorch(true);
-  const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
-  rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-  chunks = [];
-  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-  rec.onstop = () => {
-    dot.style.opacity = 0;
-    if (torchOn) setTorch(false);
-    const blob = new Blob(chunks, { type: 'video/mp4' });
-    chunks = [];
-    if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
-  };
-  rec.start(1000);
-  if (SHOW_DOT) dot.style.opacity = 0.4;
 }
 
-// 無音の写真撮影（withLight = true でライトを点けて撮影し、撮影後に消灯）
-async function takePhoto(withLight) {
-  if (!v.videoWidth || photoBusy) return;
-  photoBusy = true;
+// 録画の開始（want＝使うカメラ、withLight＝ライト点灯）
+async function startVideo(want, withLight) {
+  if (busy) return;
+  busy = true;
   haptic(1);
   try {
+    if (!(await useCamera(want))) { notice(want === 'user' ? 'インカメラを開けませんでした' : 'カメラを開けませんでした'); return; }
+    if (withLight) await setTorch(true);
+    const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
+    rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      dot.style.opacity = 0;
+      if (torchOn) setTorch(false);
+      const blob = new Blob(chunks, { type: 'video/mp4' });
+      chunks = [];
+      if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
+      if (facing === 'user') useCamera('environment'); // インカメラ録画のあとは背面カメラに戻す
+    };
+    rec.start(1000);
+    if (SHOW_DOT) dot.style.opacity = 0.4;
+  } finally {
+    busy = false;
+  }
+}
+
+// 無音の写真撮影（背面カメラ。withLight = true でライトを点けて撮影し、撮影後に消灯）
+async function takePhoto(withLight) {
+  if (busy) return;
+  busy = true;
+  haptic(1);
+  try {
+    if (!(await useCamera('environment')) || !v.videoWidth) return;
     if (withLight && await setTorch(true)) {
       await new Promise(r => setTimeout(r, TORCH_WAIT)); // 明るさが合うまで待つ
     }
@@ -282,7 +304,7 @@ async function takePhoto(withLight) {
     }, 'image/jpeg', 0.92);
   } finally {
     if (withLight && torchOn) await setTorch(false);
-    photoBusy = false;
+    busy = false;
   }
 }
 
@@ -324,7 +346,9 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：上段 左＝写真／右＝写真＋ライト、中央＝カメラ切替、下段 左＝動画／右＝動画＋ライト
+// 操作：上段 左＝写真／右＝写真＋ライト
+//       中央＝インカメラ動画
+//       下段 左＝動画／右＝動画＋ライト
 // 録画中はどこをタップしても停止
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
@@ -346,14 +370,13 @@ pad.addEventListener('pointerup', async e => {
     } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
     return;
   }
-  if (rec && rec.state === 'recording') { toggleVideo(false); return; }
+  if (rec && rec.state === 'recording') { stopVideo(); return; }
 
   const y = e.clientY / window.innerHeight;
   const isRight = e.clientX >= window.innerWidth / 2;
-  if (DEBUG && !(y >= 0.4 && y < 0.6)) status(`タップ位置 ${Math.round(y * 100)}%`);
   if (y < 0.4) takePhoto(isRight);
-  else if (y < 0.6) switchCamera();
-  else toggleVideo(isRight);
+  else if (y < 0.6) startVideo('user', false);
+  else startVideo('environment', isRight);
 });
 </script>
 </body>
