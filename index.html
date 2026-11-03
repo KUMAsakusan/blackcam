@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>BlackCam</title>
+<style>
+  html, body { margin:0; height:100%; background:#000; overflow:hidden;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
+  #pad { position:fixed; inset:0; }
+  video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
+  #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
+    width:6px; height:6px; border-radius:50%; background:#f00; opacity:0; }
+  #msg { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom) + 24px);
+    text-align:center; color:#333; font:13px -apple-system, sans-serif; }
+  #save { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px);
+    transform:translateX(-50%); display:none; background:#111; color:#555;
+    border:1px solid #222; border-radius:20px; padding:10px 20px; font:14px -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+<video id="v" muted playsinline autoplay></video>
+<div id="pad"></div>
+<div id="dot"></div>
+<button id="save"></button>
+<div id="msg">タップでカメラを起動</div>
+
+<script>
+const SHOW_DOT = true; // 録画中の赤い点・撮影時の点滅（不要なら false）
+
+const v = document.getElementById('v');
+const pad = document.getElementById('pad');
+const dot = document.getElementById('dot');
+const msg = document.getElementById('msg');
+const save = document.getElementById('save');
+
+let stream = null, rec = null, chunks = [], pending = [], wakeLock = null;
+
+// カメラ起動（音声が拒否されたら映像のみ）
+async function startCamera() {
+  const video = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+  } catch (e) {
+    stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+  }
+  v.srcObject = stream;
+  await v.play();
+  msg.textContent = '';
+  keepAwake();
+}
+
+// 画面の自動ロック防止
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+  } catch (e) {}
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && rec && rec.state === 'recording') rec.stop();
+  if (document.visibilityState === 'visible' && stream) keepAwake();
+});
+
+// 録画の開始・停止
+function toggleVideo() {
+  if (rec && rec.state === 'recording') { rec.stop(); return; }
+  const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
+  rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  chunks = [];
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    dot.style.opacity = 0;
+    const blob = new Blob(chunks, { type: 'video/mp4' });
+    chunks = [];
+    if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
+  };
+  rec.start(1000);
+  if (SHOW_DOT) dot.style.opacity = 0.35;
+}
+
+// 無音の写真撮影（映像のフレームを保存）
+function takePhoto() {
+  if (!v.videoWidth) return;
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth;
+  c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  c.toBlob(b => {
+    if (!b) return;
+    addPending(new File([b], fileName('jpg'), { type: 'image/jpeg' }));
+    blink();
+  }, 'image/jpeg', 0.92);
+}
+
+function blink() {
+  if (!SHOW_DOT || (rec && rec.state === 'recording')) return;
+  dot.style.background = '#888';
+  dot.style.opacity = 0.35;
+  setTimeout(() => { dot.style.opacity = 0; dot.style.background = '#f00'; }, 150);
+}
+
+function fileName(ext) {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `BlackCam_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+}
+
+function addPending(file) { pending.push(file); updateSave(); }
+
+function updateSave() {
+  save.style.display = pending.length ? 'block' : 'none';
+  save.textContent = `保存（${pending.length}件）`;
+}
+
+// 保存（共有シート →「ビデオを保存」「画像を保存」）
+save.addEventListener('click', async e => {
+  e.stopPropagation();
+  const files = pending.slice();
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files }); } catch (err) { return; } // キャンセル時は残す
+  } else {
+    files.forEach(f => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(f);
+      a.download = f.name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    });
+  }
+  pending = [];
+  updateSave();
+});
+
+// 操作：タップ＝起動、ダブルタップ＝録画、長押し＝写真
+let pressTimer = null, longFired = false, lastTap = 0;
+
+pad.addEventListener('pointerdown', () => {
+  longFired = false;
+  pressTimer = setTimeout(() => { longFired = true; if (stream) takePhoto(); }, 600);
+});
+
+pad.addEventListener('pointerup', async () => {
+  clearTimeout(pressTimer);
+  if (longFired) return;
+  if (!stream) {
+    try { await startCamera(); } catch (e) { msg.textContent = 'カメラとマイクを許可してください'; }
+    return;
+  }
+  const now = Date.now();
+  if (now - lastTap < 350) { lastTap = 0; toggleVideo(); } else { lastTap = now; }
+});
+
+pad.addEventListener('pointercancel', () => clearTimeout(pressTimer));
+</script>
+</body>
+</html>
