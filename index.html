@@ -306,4 +306,29 @@ save.addEventListener('click', async e => {
 let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
 pad.addEventListener('pointerdown', e => {
-  downX = e.clientX; downY = e.clientY; downT = Date.now
+  downX = e.clientX; downY = e.clientY; downT = Date.now();
+});
+
+pad.addEventListener('pointerup', async e => {
+  const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+  if (moved > 20 || Date.now() - downT > 800) return; // スワイプ・長押しは無視
+  if (Date.now() - lastAction < 500) return;          // 連続反応の防止
+  lastAction = Date.now();
+
+  if (!stream) {
+    haptic(1);
+    try { await startCamera(); }
+    catch (err) { msg.textContent = err && err.name === 'NotAllowedError' ? 'カメラを許可してください' : 'カメラを開けませんでした'; }
+    return;
+  }
+  if (rec && rec.state === 'recording') { stopVideo(); return; }
+
+  const y = e.clientY / window.innerHeight;
+  const isRight = e.clientX >= window.innerWidth / 2;
+  if (y < 0.4) takePhoto(isRight);
+  else if (y < 0.6) startVideo('user', false);
+  else startVideo('environment', isRight);
+});
+</script>
+</body>
+</html>
