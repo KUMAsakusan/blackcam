@@ -5,39 +5,71 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
 <title>BlackCam</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
-  #pad { position:fixed; inset:0; }
+  #pad { position:fixed; inset:0; background:#000; }
   video { position:fixed; width:1px; height:1px; opacity:0; pointer-events:none; }
   #dot { position:fixed; top:calc(env(safe-area-inset-top) + 8px); right:12px;
-    width:6px; height:6px; border-radius:50%; background:#f00; opacity:0; }
+    width:8px; height:8px; border-radius:50%; background:#f00; opacity:0; pointer-events:none; }
   #msg { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom) + 24px);
-    text-align:center; color:#333; font:13px -apple-system, sans-serif; }
+    text-align:center; color:#2a2a2a; font:14px -apple-system, sans-serif; pointer-events:none; }
+  #guide { position:fixed; inset:0; display:flex; flex-direction:column;
+    pointer-events:none; opacity:0; transition:opacity .6s; }
+  #guide div { flex:1; display:flex; align-items:center; justify-content:center;
+    color:#444; font:15px -apple-system, sans-serif; }
+  #guide div:first-child { border-bottom:1px dashed #222; }
   #save { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px);
-    transform:translateX(-50%); display:none; background:#111; color:#555;
-    border:1px solid #222; border-radius:20px; padding:10px 20px; font:14px -apple-system, sans-serif; }
+    transform:translateX(-50%); display:none; background:#050505; color:#2a2a2a;
+    border:1px solid #111; border-radius:20px; padding:12px 24px; font:15px -apple-system, sans-serif; }
 </style>
 </head>
 <body>
 <video id="v" muted playsinline autoplay></video>
 <div id="pad"></div>
+<div id="guide">
+  <div>上半分をタップ：動画 開始／停止</div>
+  <div>下半分をタップ：写真</div>
+</div>
 <div id="dot"></div>
 <button id="save"></button>
 <div id="msg">タップでカメラを起動</div>
 
 <script>
-const SHOW_DOT = true; // 録画中の赤い点・撮影時の点滅（不要なら false）
+const SHOW_DOT   = false; // 録画中の赤い点（表示するなら true）
+const SHOW_GUIDE = false; // 起動時の操作説明（表示するなら true）
+const HAPTICS    = true;  // 振動（不要なら false）
 
 const v = document.getElementById('v');
 const pad = document.getElementById('pad');
 const dot = document.getElementById('dot');
 const msg = document.getElementById('msg');
+const guide = document.getElementById('guide');
 const save = document.getElementById('save');
 
 let stream = null, rec = null, chunks = [], pending = [], wakeLock = null;
+
+// 振動（iOS 18以降のSafari）
+function haptic(times = 1) {
+  if (!HAPTICS) return;
+  for (let i = 0; i < times; i++) {
+    setTimeout(() => {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.setAttribute('switch', '');
+      label.style.display = 'none';
+      label.appendChild(input);
+      document.body.appendChild(label);
+      label.click();
+      label.remove();
+    }, i * 150);
+  }
+}
 
 // カメラ起動（音声が拒否されたら映像のみ）
 async function startCamera() {
@@ -50,6 +82,10 @@ async function startCamera() {
   v.srcObject = stream;
   await v.play();
   msg.textContent = '';
+  if (SHOW_GUIDE) {
+    guide.style.opacity = 1;
+    setTimeout(() => { guide.style.opacity = 0; }, 3000);
+  }
   keepAwake();
 }
 
@@ -67,7 +103,11 @@ document.addEventListener('visibilitychange', () => {
 
 // 録画の開始・停止
 function toggleVideo() {
-  if (rec && rec.state === 'recording') { rec.stop(); return; }
+  if (rec && rec.state === 'recording') {
+    rec.stop();
+    haptic(2);
+    return;
+  }
   const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
   rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
   chunks = [];
@@ -79,33 +119,34 @@ function toggleVideo() {
     if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
   };
   rec.start(1000);
-  if (SHOW_DOT) dot.style.opacity = 0.35;
+  haptic(1);
+  if (SHOW_DOT) dot.style.opacity = 0.4;
 }
 
 // 無音の写真撮影（映像のフレームを保存）
 function takePhoto() {
   if (!v.videoWidth) return;
+  haptic(1);
+  blink();
   const c = document.createElement('canvas');
   c.width = v.videoWidth;
   c.height = v.videoHeight;
   c.getContext('2d').drawImage(v, 0, 0);
   c.toBlob(b => {
-    if (!b) return;
-    addPending(new File([b], fileName('jpg'), { type: 'image/jpeg' }));
-    blink();
+    if (b) addPending(new File([b], fileName('jpg'), { type: 'image/jpeg' }));
   }, 'image/jpeg', 0.92);
 }
 
 function blink() {
   if (!SHOW_DOT || (rec && rec.state === 'recording')) return;
   dot.style.background = '#888';
-  dot.style.opacity = 0.35;
+  dot.style.opacity = 0.4;
   setTimeout(() => { dot.style.opacity = 0; dot.style.background = '#f00'; }, 150);
 }
 
 function fileName(ext) {
   const d = new Date(), p = n => String(n).padStart(2, '0');
-  return `BlackCam_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+  return `BlackCam_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}_${d.getMilliseconds()}.${ext}`;
 }
 
 function addPending(file) { pending.push(file); updateSave(); }
@@ -134,26 +175,27 @@ save.addEventListener('click', async e => {
   updateSave();
 });
 
-// 操作：タップ＝起動、ダブルタップ＝録画、長押し＝写真
-let pressTimer = null, longFired = false, lastTap = 0;
+// 操作：上半分タップ＝動画、下半分タップ＝写真
+let downX = 0, downY = 0, downT = 0, lastAction = 0;
 
-pad.addEventListener('pointerdown', () => {
-  longFired = false;
-  pressTimer = setTimeout(() => { longFired = true; if (stream) takePhoto(); }, 600);
+pad.addEventListener('pointerdown', e => {
+  downX = e.clientX; downY = e.clientY; downT = Date.now();
 });
 
-pad.addEventListener('pointerup', async () => {
-  clearTimeout(pressTimer);
-  if (longFired) return;
+pad.addEventListener('pointerup', async e => {
+  const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+  if (moved > 20 || Date.now() - downT > 800) return; // スワイプ・長押しは無視
+  if (Date.now() - lastAction < 500) return;          // 連続反応の防止
+  lastAction = Date.now();
+
   if (!stream) {
-    try { await startCamera(); } catch (e) { msg.textContent = 'カメラとマイクを許可してください'; }
+    haptic(1);
+    try { await startCamera(); } catch (err) { msg.textContent = 'カメラとマイクを許可してください'; }
     return;
   }
-  const now = Date.now();
-  if (now - lastTap < 350) { lastTap = 0; toggleVideo(); } else { lastTap = now; }
+  if (e.clientY < window.innerHeight / 2) toggleVideo();
+  else takePhoto();
 });
-
-pad.addEventListener('pointercancel', () => clearTimeout(pressTimer));
 </script>
 </body>
 </html>
