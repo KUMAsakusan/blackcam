@@ -73,9 +73,15 @@ let camQueue = Promise.resolve(); // カメラ切替を1つずつ順番に行う
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// 振動（iOS 18以降のSafari）
+// 振動（Androidは標準の振動機能、iPhoneはiOS 18以降のSafariの仕組みを使う）
 function haptic(times = 1) {
   if (!HAPTICS) return;
+  if (navigator.vibrate) {
+    const pattern = [];
+    for (let i = 0; i < times; i++) pattern.push(40, 110);
+    navigator.vibrate(pattern);
+    return;
+  }
   for (let i = 0; i < times; i++) {
     setTimeout(() => {
       const label = document.createElement('label');
@@ -188,7 +194,25 @@ async function setTorch(on) {
       return true;
     } catch (e) {}
   }
+  // 消灯できない機種（一部のAndroid）では、カメラを開き直してライトを確実に消す
+  if (!on && torchOn) {
+    try {
+      videoTrack.stop();
+      videoTrack = await openVideoTrack(facing);
+      await attachStream();
+    } catch (e) {}
+    torchOn = false;
+  }
   return false;
+}
+
+// 録画形式（iPhoneはMP4、AndroidはMP4が使えなければWebM）
+function pickVideoType() {
+  const list = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  for (const t of list) {
+    try { if (MediaRecorder.isTypeSupported(t)) return t; } catch (e) {}
+  }
+  return '';
 }
 
 // 画面の自動ロック防止
@@ -220,16 +244,18 @@ async function startVideo(want, withLight) {
   try {
     if (!(await useCamera(want))) { notice(want === 'user' ? 'インカメラを開けませんでした' : 'カメラを開けませんでした'); return; }
     if (withLight) await setTorch(true);
-    const type = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : '';
+    const type = pickVideoType();
     rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
     chunks = [];
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = () => {
       dot.style.opacity = 0;
       if (torchOn) setTorch(false);
-      const blob = new Blob(chunks, { type: 'video/mp4' });
+      const mime = (rec.mimeType || type || 'video/mp4').split(';')[0];
+      const ext = mime.includes('webm') ? 'webm' : 'mp4';
+      const blob = new Blob(chunks, { type: mime });
       chunks = [];
-      if (blob.size) addPending(new File([blob], fileName('mp4'), { type: 'video/mp4' }));
+      if (blob.size) addPending(new File([blob], fileName(ext), { type: mime }));
       if (facing === 'user') useCamera('environment'); // インカメラ録画のあとは背面カメラに戻す
     };
     rec.start(1000);
@@ -284,9 +310,12 @@ function updateSave() {
 save.addEventListener('click', async e => {
   e.stopPropagation();
   const files = pending.slice();
+  let shared = false;
   if (navigator.canShare && navigator.canShare({ files })) {
-    try { await navigator.share({ files }); } catch (err) { return; } // キャンセル時は残す
-  } else {
+    try { await navigator.share({ files }); shared = true; }
+    catch (err) { if (err.name === 'AbortError') return; } // キャンセル時は残す。それ以外の失敗はダウンロードで保存
+  }
+  if (!shared) {
     files.forEach(f => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(f);
