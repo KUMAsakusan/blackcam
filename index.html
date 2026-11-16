@@ -71,6 +71,8 @@ let stream = null, videoTrack = null;
 let rec = null, chunks = [], pending = [], wakeLock = null, torchOn = false, busy = false;
 let facing = 'environment'; // environment＝背面カメラ、user＝インカメラ
 let camQueue = Promise.resolve(); // カメラ切替を1つずつ順番に行うための待ち行列
+let lastCamError = ''; // カメラを開けなかった理由（画面下の表示用）
+let backDeviceId = ''; // 背面カメラの識別番号
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -112,19 +114,42 @@ async function openVideoTrack(want) {
     { facingMode: want }
   ];
   let lastErr = null;
-  for (const video of tries) {
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-      const t = s.getVideoTracks()[0];
-      const fm = t.getSettings ? t.getSettings().facingMode : undefined;
-      if (fm && fm !== want) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
-      return t;
-    } catch (e) {
-      lastErr = e;
-      if (e.name === 'NotAllowedError') break; // 許可されていないときは他の方法も無駄
+  // Androidは直前のカメラの解放に時間がかかることがあるため、少し待って最大3回やり直す
+  for (let round = 0; round < 3; round++) {
+    if (round > 0) await sleep(400 * round);
+    for (const video of tries) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        const t = s.getVideoTracks()[0];
+        const fm = t.getSettings ? t.getSettings().facingMode : undefined;
+        if (fm && fm !== want) { t.stop(); continue; } // 違う向きのカメラが開いたらやり直す
+        return t;
+      } catch (e) {
+        lastErr = e;
+        if (e.name === 'NotAllowedError') throw e; // 許可されていないときはやり直しても無駄
+      }
     }
   }
+  // 最後の手段：カメラの名前（front／back など）から探す。名前で分からなければ背面以外のカメラを使う
+  try {
+    const re = want === 'user' ? /front|前面|フロント|user/i : /back|背面|バック|rear|environment/i;
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(x => x.kind === 'videoinput');
+    const d = cams.find(x => re.test(x.label)) ||
+      (want === 'user' ? cams.find(x => x.deviceId && x.deviceId !== backDeviceId)
+                       : cams.find(x => x.deviceId && x.deviceId === backDeviceId));
+    if (d) {
+      const s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId } }, audio: false });
+      return s.getVideoTracks()[0];
+    }
+  } catch (e) { lastErr = e; }
   throw lastErr || new Error('カメラが見つかりません');
+}
+
+// 背面カメラの識別番号を覚えておく（インカメラを探すときの目印）
+function rememberBack() {
+  try {
+    if (facing === 'environment' && videoTrack) backDeviceId = videoTrack.getSettings().deviceId || backDeviceId;
+  } catch (e) {}
 }
 
 // 映像をプレビュー（非表示）に流し、流れ始めるまで待つ
@@ -143,6 +168,7 @@ async function attachStream() {
 async function startCamera() {
   videoTrack = await openVideoTrack('environment');
   facing = 'environment';
+  rememberBack();
   await attachStream();
   msg.textContent = '';
   if (SHOW_GUIDE) {
@@ -159,7 +185,10 @@ function useCamera(want) {
     if (facing === want && videoTrack && videoTrack.readyState === 'live') return true;
     if (torchOn) await setTorch(false);
     const prev = facing;
-    videoTrack.stop(); // iOSは別のカメラを同時に使えないため、先に今のカメラを止める
+    lastCamError = '';
+    videoTrack.stop(); // iOS・Androidは別のカメラを同時に使えないため、先に今のカメラを止める
+    v.srcObject = null;
+    await sleep(150);  // カメラが解放されるのを少し待つ
     try {
       videoTrack = await openVideoTrack(want);
       facing = want;
@@ -167,6 +196,7 @@ function useCamera(want) {
       await sleep(200); // 明るさ・ピントが落ち着くまで少し待つ
       return true;
     } catch (e) {
+      lastCamError = e.name || e.message || '';
       try {
         videoTrack = await openVideoTrack(prev); // 失敗したら元のカメラに戻す
         facing = prev;
@@ -243,7 +273,7 @@ async function startVideo(want, withLight) {
   busy = true;
   haptic(1);
   try {
-    if (!(await useCamera(want))) { notice(want === 'user' ? 'インカメラを開けませんでした' : 'カメラを開けませんでした'); return; }
+    if (!(await useCamera(want))) { notice((want === 'user' ? 'インカメラを開けませんでした' : 'カメラを開けませんでした') + (lastCamError ? `（${lastCamError}）` : '')); return; }
     if (withLight) await setTorch(true);
     const type = pickVideoType();
     rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
